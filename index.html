@@ -344,6 +344,12 @@ body.admin-peek #app{margin-right:56px}
 .img-prev figure button{font:600 11px var(--f-body);border:0;border-radius:6px;padding:3px 6px;background:rgba(10,20,48,.85);color:#fff;cursor:pointer}
 .ad-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .ad-size{font-family:var(--f-mono);font-size:11.5px;color:var(--s-ink-2)}
+.ad-login{display:grid;gap:14px;padding:22px 16px;align-content:start}
+.ad-login p{margin:0;font-size:13.5px;color:var(--s-ink-2);line-height:1.5}
+.ad-login input[type=password]{width:100%;font:15px var(--f-body);padding:10px 12px;border-radius:9px;border:1px solid var(--s-rule);background:var(--s-card);color:var(--s-ink)}
+.ad-login input:focus{outline:2px solid #2457f5;outline-offset:0;border-color:transparent}
+.ad-login .ad-err{color:#c62828;font-size:13px}
+.ad-login .ad-err:empty{display:none}
 @media (max-width:760px){body.admin-on #app{margin-right:0}}
 </style>
 </head>
@@ -649,6 +655,43 @@ body.admin-peek #app{margin-right:56px}
       '<script src="https://cdn.jsdelivr.net/npm/motion@12.4.7/dist/motion.js">'+SC+'\n<script id="main">'+main+SC+'\n</body></html>';
   }
 
+  /* ================= sign-in (hosted site, see netlify/functions/admin.mjs) ================= */
+  const TOKEN_KEY='ll-admin-token',HOSTED_MAX=5*1048576;
+  const isLocal=location.protocol==='file:'||/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  let offline=false,memTok=null;
+  const token=()=>{const t=store.get(TOKEN_KEY)||memTok;return t&&+t.split('.')[0]>Date.now()?t:null};
+  const signOut=()=>{store.del(TOKEN_KEY);memTok=null};
+  async function api(route,body){
+    const t=token(),h={'content-type':'application/json'};if(t)h.authorization='Bearer '+t;
+    const r=await fetch('/api/admin/'+route,{method:'POST',headers:h,body:JSON.stringify(body||{})});
+    let data={};try{data=await r.json()}catch(e){}
+    return {status:r.status,data};
+  }
+  function goOffline(){offline=true;closeAdmin();openAdmin()}
+  function showLogin(note){
+    closeAdmin();
+    adminEl=el('aside',{id:'admin','aria-label':'Sign in to edit'});
+    adminEl.innerHTML='<div class="ad-top"><h2>Sign in</h2><button type="button" class="ad-btn" id="adClose" aria-label="Close">✕</button></div>'+
+      '<form class="ad-login" id="adLogin"><p>Enter the editor password to change the live site.</p>'+
+      '<div class="fld"><label for="adPw">Password</label><input type="password" id="adPw" autocomplete="current-password" required></div>'+
+      '<div class="ad-row"><button type="submit" class="ad-btn pri" id="adSignIn">Sign in</button></div><p class="ad-err" id="adErr" role="alert"></p></form>';
+    document.body.appendChild(adminEl);document.body.classList.add('admin-on');
+    $('#adClose').onclick=closeAdmin;
+    const err=$('#adErr');if(note)err.textContent=note;
+    $('#adLogin').onsubmit=async e=>{
+      e.preventDefault();const b=$('#adSignIn');b.disabled=true;b.textContent='Signing in…';err.textContent='';
+      try{
+        const {status,data}=await api('login',{password:$('#adPw').value});
+        if(status===200&&data.token){if(!store.set(TOKEN_KEY,data.token))memTok=data.token;closeAdmin();openAdmin();return}
+        /* local preview without the function running: edit offline, download only */
+        if(isLocal&&!data.error){goOffline();return}
+        err.textContent=status===429?'Too many attempts. Wait a minute and try again.':(data.error||'Sign-in failed ('+status+').');
+      }catch(x){if(isLocal){goOffline();return}err.textContent='Could not reach the server. Check your connection and try again.'}
+      b.disabled=false;b.textContent='Sign in';
+    };
+    $('#adPw').focus();
+  }
+
   /* ================= admin ================= */
   const S={
     site:{t:'General',f:[['title','Browser tab title'],['brand1','Logo, first word'],['brand2','Logo, second word'],['status','Availability text (top right)'],['footerThanks','Footer sign-off'],['footerNote','Footer note']]},
@@ -681,7 +724,7 @@ body.admin-peek #app{margin-right:56px}
     renderT=setTimeout(()=>{render();const ok=store.set(DRAFT_KEY,JSON.stringify(C));setMsg(ok?'Draft saved on this device. Publish to make it live.':'Changes not saved on this device (too large for browser storage). Publish to keep them.');updateSize()},250);
   }
   function setMsg(m){const el=$('#adMsg');if(el)el.textContent=m}
-  function updateSize(){const el=$('#adSize');if(!el)return;const mb=totalSize()/1048576;el.textContent='Page size '+mb.toFixed(1)+' MB of 16 MB';el.style.color=mb>14?'#c62828':''}
+  function updateSize(){const el=$('#adSize');if(!el)return;const lim=inClaude?16:HOSTED_MAX/1048576;const mb=(inClaude?totalSize():new Blob([JSON.stringify(C)]).size)/1048576;el.textContent=(inClaude?'Page':'Content')+' size '+mb.toFixed(1)+' MB of '+lim+' MB';el.style.color=mb>lim*.875?'#c62828':''}
 
   function el(tag,attrs,kids){const n=document.createElement(tag);for(const k in attrs||{}){if(k==='text')n.textContent=attrs[k];else if(k.startsWith('on'))n.addEventListener(k.slice(2),attrs[k]);else n.setAttribute(k,attrs[k])}(kids||[]).forEach(k=>k&&n.appendChild(typeof k==='string'?document.createTextNode(k):k));return n}
   let uid=0;const nid=()=>'f'+(++uid);
@@ -750,26 +793,47 @@ body.admin-peek #app{margin-right:56px}
 
   function openAdmin(){
     if(adminEl){document.body.classList.remove('admin-peek');return}
+    const hosted=!inClaude&&!offline;
+    if(hosted&&!token()){showLogin();return}
     const draft=store.get(DRAFT_KEY);let restored=false;
     if(draft&&draft!==JSON.stringify(ORIGINAL)){try{C=JSON.parse(draft);restored=true;render()}catch(e){}}
+    else if(draft)store.del(DRAFT_KEY);
     adminEl=el('aside',{id:'admin','aria-label':'Site editor'});
     adminEl.innerHTML='<div class="ad-top"><h2>Edit site</h2><button type="button" class="ad-btn" id="adPeek">Preview</button><button type="button" class="ad-btn" id="adExport">Download site file</button><button type="button" class="ad-btn pri" id="adPublish">Publish</button><button type="button" class="ad-btn" id="adClose" aria-label="Close editor">✕</button></div>'+
       '<div class="ad-msg" id="adMsg"></div><div class="ad-tabs">'+Object.keys(S).map(k=>'<button type="button" data-t="'+k+'">'+S[k].t+'</button>').join('')+'</div>'+
-      '<div class="ad-body" id="adBody"></div><div style="padding:10px 16px;border-top:1px solid var(--s-rule);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><span class="ad-size" id="adSize"></span><button type="button" class="ad-btn sm danger" id="adDiscard">Discard draft</button></div>';
+      '<div class="ad-body" id="adBody"></div><div style="padding:10px 16px;border-top:1px solid var(--s-rule);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><span class="ad-size" id="adSize"></span><span class="ad-row">'+(hosted?'<button type="button" class="ad-btn sm" id="adOut">Sign out</button>':'')+'<button type="button" class="ad-btn sm danger" id="adDiscard">Discard draft</button></span></div>';
     document.body.appendChild(adminEl);document.body.classList.add('admin-on');
     adminEl.querySelector('.ad-tabs').addEventListener('click',e=>{const b=e.target.closest('[data-t]');if(b){tab=b.dataset.t;drawTab()}});
     $('#adClose').onclick=closeAdmin;
     $('#adPeek').onclick=()=>{const on=document.body.classList.toggle('admin-peek');$('#adPeek').textContent=on?'Edit':'Preview'};
     $('#adPublish').onclick=publish;$('#adExport').onclick=exportFile;
     $('#adDiscard').onclick=()=>{const b=$('#adDiscard');if(b.dataset.c){store.del(DRAFT_KEY);C=JSON.parse(JSON.stringify(ORIGINAL));dirty=false;render();drawTab();updateSize();setMsg('Draft discarded. Showing the published version.');delete b.dataset.c;b.textContent='Discard draft'}else{b.dataset.c='1';b.textContent='Click again to discard'}};
+    if(hosted){
+      $('#adOut').onclick=()=>{signOut();closeAdmin();toast('Signed out.')};
+      api('session').then(r=>{if(r.status===401&&adminEl){signOut();showLogin('Your session has ended. Sign in again; your draft is kept on this device.')}}).catch(()=>{});
+    }
     drawTab();updateSize();
-    setMsg(restored?'Restored your unpublished draft from this device.':(inClaude?(art?'Edit any section, then Publish to update the live page.':'Publishing is not available in this view. Use Download site file to keep your changes.'):'You are editing a hosted copy. When done, use Download site file and upload it to your host (e.g. as index.html).'));
-    if(!inClaude||!art)$('#adPublish').disabled=true;
-    if(location.hash!=='#admin'){}
+    setMsg(restored?'Restored your unpublished draft from this device.':(inClaude?(art?'Edit any section, then Publish to update the live page.':'Publishing is not available in this view. Use Download site file to keep your changes.'):
+      offline?'Editing offline (sign-in only works on the live site or under netlify dev). Use Download site file to keep your changes.':'Signed in. Edit any section, then Publish to update the live site.'));
+    if(inClaude?!art:offline)$('#adPublish').disabled=true;
   }
   function closeAdmin(){if(!adminEl)return;adminEl.remove();adminEl=null;document.body.classList.remove('admin-on','admin-peek')}
 
+  async function publishHosted(){
+    const btn=$('#adPublish');
+    if(new Blob([JSON.stringify(C)]).size>HOSTED_MAX){setMsg('The content is over 5 MB. Remove or replace some large images, then publish again.');return}
+    btn.disabled=true;btn.textContent='Publishing…';setMsg('Publishing…');
+    store.set(DRAFT_KEY,JSON.stringify(C));
+    try{
+      const {status,data}=await api('publish',{content:C});
+      if(status===200){dirty=false;setMsg('Published. Netlify is rebuilding the site; your changes will be live in about a minute.');toast('Published.')}
+      else if(status===401){signOut();showLogin('Your session has ended. Sign in again, then Publish. Your changes are kept.');return}
+      else setMsg(status===429?'Too many requests. Wait a minute, then try again.':status===413?'The content is too large. Remove or shrink some images, then publish again.':(data.error||'Publishing failed ('+status+'). Your changes are still here; try again.'));
+    }catch(err){setMsg('Could not reach the server. Your changes are still here; try again.')}
+    btn.disabled=false;btn.textContent='Publish';
+  }
   async function publish(){
+    if(!inClaude)return publishHosted();
     if(!art)return;const btn=$('#adPublish');
     const html=buildPage(C);
     if(html.length>16*1048576){setMsg('The page is over 16 MB. Remove or replace some large images, then publish again.');return}
